@@ -84,6 +84,7 @@ pip install pyyaml   # only Python dependency; used by inline scripts inside lin
 
 **Optional — for full local lint parity with CI:**
 ```bash
+# Install shellcheck (varies by OS)
 brew install shellcheck        # macOS
 sudo apt-get install shellcheck  # Ubuntu/Debian
 ```
@@ -108,6 +109,25 @@ This is the only required command. It runs 6 checks:
 
 CI runs this on every push to main and every PR. Do not skip it.
 
+### Install (user-facing, not development)
+
+**Claude Desktop:**
+```
+Customize → Browse plugins → + → Add marketplace from GitHub → AlpacaLabsLLC/skills-for-architects
+```
+
+**Claude Code:**
+```bash
+claude plugin marketplace add AlpacaLabsLLC/skills-for-architects
+claude plugin install 01-site-planning@skills-for-architects   # install a specific plugin
+```
+
+**Enable hooks (after plugin install):**
+```bash
+chmod +x ~/.claude/plugins/skills-for-architects/hooks/*.sh
+# Then merge hooks/settings-snippet.json into ~/.claude/settings.json
+```
+
 ### Versioning (required on every shipped change — three artifacts)
 
 ```bash
@@ -119,7 +139,9 @@ git push origin vX.Y.Z
 gh release create vX.Y.Z --title "vX.Y.Z — ..." --notes-file <changelog-section-tempfile>
 ```
 
-All three artifacts (JSON version field, git tag, GitHub release) must move together.
+All three artifacts (JSON version field, git tag, GitHub release) must move together. Skipping any one leaves discoverability holes: plugin runtimes won't see updates without the JSON bump; `git checkout` won't work without the tag; no shareable URL without the GitHub release.
+
+There are no build, test, or compile commands. No `package.json`, no `Makefile`, no `pyproject.toml`.
 
 ## Architecture Overview
 
@@ -150,20 +172,20 @@ calls specific skill(s) in plugins/<NN-*/skills/<skill>/SKILL.md
 | Hooks | `hooks/*.sh` | Event-driven Bash automations; opt-in via settings-snippet.json |
 | Reference data | `plugins/*/skills/*/data/`, `plugins/*/schema/`, `zoning-rules/` | Supporting data Claude reads on demand |
 
-**Dispatcher pattern:** The `studio` skill in `08-dispatcher` is the single entry point. Hard rules from production bugs belong in the dispatcher (global inheritance) AND in each affected sub-skill (enforced even when dispatcher is bypassed).
+**Dispatcher pattern:** The `studio` skill in `08-dispatcher` is the single entry point. It reads agent files from `agents/` and routes to the right agent or plugin skill. Hard rules captured from production bugs belong in the dispatcher (for global inheritance) AND repeated in each affected sub-skill (so they are enforced even when the dispatcher is bypassed).
 
 ## Key Files
 
 | File | Purpose |
-|------|---------|
-| `PATTERNS.md` | Canonical 10-rule reference for plugin/marketplace conventions. Read this before any structural change. |
+|------|--------|
+| `PATTERNS.md` | Canonical 10-rule reference for plugin/marketplace conventions. Read this before any structural change — it documents the WHY behind every convention and covers rules distilled from real production bugs. |
 | `.claude-plugin/marketplace.json` | Marketplace registry listing all 9 plugins. Version must stay in sync with actual plugin directories and README counts. |
 | `scripts/lint.sh` | The only required command. 6 structural checks. Run before every commit. |
-| `plugins/08-dispatcher/skills/studio/SKILL.md` | Entry-point router for the entire marketplace. |
-| `rules/professional-disclaimer.md` | Defines the canonical disclaimer block and the `<!-- architecture-studio:requires-disclaimer -->` marker. |
+| `plugins/08-dispatcher/skills/studio/SKILL.md` | Entry-point router for the entire marketplace. Routes requests to agents and skills. |
+| `rules/professional-disclaimer.md` | Defines the canonical disclaimer block and the `<!-- architecture-studio:requires-disclaimer -->` marker required on all regulatory outputs. |
 | `hooks/settings-snippet.json` | JSON to merge into `~/.claude/settings.json` to enable the three hooks locally. |
 | `plugins/06-materials-research/schema/product-schema.md` | 33-column product sheet schema shared by all 12 materials-research skills. |
-| `plugins/02-zoning-analysis/skills/zoning-analysis-nyc/zoning-rules/` | 10 bundled NYC Zoning Resolution reference docs. |
+| `plugins/02-zoning-analysis/skills/zoning-analysis-nyc/zoning-rules/` | 10 bundled NYC Zoning Resolution reference docs consumed by the zoning skill. |
 
 ## Code Conventions and Patterns
 
@@ -176,22 +198,27 @@ SKILL.md must begin with YAML frontmatter (`---` delimited) containing at minimu
 - `description`: trigger-phrase-rich; this is what drives model invocation — optimize for discoverability
 
 Optional frontmatter fields:
-- `allowed-tools`: scoped only to what this specific skill actually uses
+- `allowed-tools`: scoped only to what this specific skill actually uses (not the union of all plugin tools — overly broad grants are a lint/audit concern)
 - `user-invocable: true`: for skills that can be invoked via slash command
-- `disable-model-invocation: true`: for slash-only skills
+- `disable-model-invocation: true`: for slash-only skills that should not be auto-invoked
 
-Skills are **single-purpose** (one verb). If a SKILL.md exceeds ~500 lines or handles multiple distinct verbs, split it.
+Skills are **single-purpose** (one verb). If a SKILL.md exceeds ~500 lines or handles multiple distinct verbs, split it into separate skills.
+
+Each skill directory also has a `README.md`.
+
+Supporting data and reference files go in subdirectories: `data/`, `zoning-rules/`, `schema/`, etc.
 
 ### Plugin Manifest Conventions
 
 Each plugin has `.claude-plugin/plugin.json` with: `name`, `version` (semver), `description`, `author`, `keywords`, `homepage`, `license`.
 
-The marketplace `.claude-plugin/marketplace.json` lists all plugins with `name`, `source`, `description`.
+The marketplace `.claude-plugin/marketplace.json` lists all plugins with `name`, `source` (e.g., `./plugins/<name>`), `description`.
 
 ### Naming Conventions
 
 - Plugin directories: kebab-case with numbered prefix (`00-`, `01-`, etc.)
-- Skill names: bare verb in kebab-case (`nyc-landmarks`, `spec-writer`)
+- Skill names: bare verb in kebab-case (`nyc-landmarks`, `spec-writer`) — already namespaced by plugin directory
+- Dispatcher skill name matches plugin name (`studio` for `08-dispatcher`)
 - Agent files: `<role>.md` in kebab-case under `agents/`
 
 ### Count Consistency (enforced by lint)
@@ -203,39 +230,68 @@ These counts must all match actual file counts at all times:
 - `skills-menu` SKILL.md claim
 - `marketplace.json` plugin list count vs. actual plugin directories
 
-When adding any skill or plugin, update ALL of these in the same commit.
+When adding any skill or plugin, update ALL of these in the same commit. The lint script will catch any drift.
 
 ### Disclaimer and Regulatory Output Rules
 
 - **Never say** "complies with" — say "appears consistent with [code section]"
 - **Never say** "no violations" — say "no violations were identified in the data reviewed"
-- All zoning, occupancy, structural, environmental, and code outputs require the canonical disclaimer block followed by `<!-- architecture-studio:requires-disclaimer -->` as the last line
-- Hooks are **marker-driven**, not keyword-sniffed
+- All zoning, occupancy, structural, environmental, and code outputs require the canonical disclaimer block (defined in `rules/professional-disclaimer.md`) followed by the marker `<!-- architecture-studio:requires-disclaimer -->` as the last line of the file
+- Hooks are **marker-driven**, not keyword-sniffed. The `post-write-disclaimer-check.sh` hook validates that the marker is present; it does not scan for keywords
+- Hooks warn but do not block by default (exit 0 at warning; change to exit 2 in the hook script to enforce blocking)
+
+### Rules vs. Agents vs. Skills
+
+| Type | Location | How it works |
+|------|----------|-------------|
+| Rules | `rules/*.md` | Passive reference docs; loaded automatically; never invoked directly |
+| Agents | `agents/*.md` | Orchestration personas; Claude reads them via Read tool when the dispatcher routes a request; they define which skills to call and in what order; they do not contain tool calls directly |
+| Skills | `plugins/*/skills/*/SKILL.md` | Single-purpose workflow instructions; invoked by the dispatcher or directly by the user |
+
+### Cross-References Between Skills
+
+Cross-plugin references use the full slash invocation path as documented in `PATTERNS.md` section 3. There is no implicit shared state between skills. Contracts (expected input/output format) are documented in each SKILL.md body.
+
+### MCP Tools
+
+Some skills reference MCP tools (e.g., `mcp__google-sheets__*` in the product-research skill). These require users to have the relevant MCP servers configured separately in their Claude Desktop or Claude Code settings. Document any MCP dependencies in the skill's frontmatter `allowed-tools` field and in its README.
 
 ## How AI Assistants Should Work in This Repo
 
-**Before any structural change:** Read `PATTERNS.md`.
+**Before any structural change:** Read `PATTERNS.md`. It documents the WHY behind every convention and covers 10 rules distilled from real production bugs.
 
-**Before every commit:** Run `./scripts/lint.sh`. Fix all failures before pushing.
+**Before every commit:** Run `./scripts/lint.sh`. Fix all failures before pushing. CI will catch them anyway, but fixing locally is faster.
 
 **When adding a new skill:**
 1. Create `plugins/<NN-plugin-name>/skills/<new-skill>/SKILL.md` with correct YAML frontmatter
 2. Create `plugins/<NN-plugin-name>/skills/<new-skill>/README.md`
-3. Update ALL README counts and `skills-menu` SKILL.md count claim
-4. Run `./scripts/lint.sh`
+3. Update the README.md headline counts (`**N skills**`)
+4. Update the README.md details block (`All N skills`)
+5. Update the per-plugin row count in the README table
+6. Update the `skills-menu` SKILL.md count claim
+7. If adding a new plugin: update `marketplace.json` and the README plugin count
+8. Run `./scripts/lint.sh` — it will catch any count drift you missed
 
 **When adding a new plugin:**
 1. Create `plugins/<NN-new-plugin>/` with `.claude-plugin/plugin.json`, `README.md`, and `skills/` subdirectory
 2. Add entry to `.claude-plugin/marketplace.json`
-3. Update all README counts and `skills-menu`
-4. Run `./scripts/lint.sh`
+3. Update all README counts
+4. Update `skills-menu` SKILL.md
+5. Run `./scripts/lint.sh`
 
-**When bumping versions:** All three artifacts must move together — `plugin.json` version field, `marketplace.json` metadata.version, git tag AND GitHub release.
+**When bumping versions:**
+All three artifacts must move together in a single logical change:
+- The `version` field in the relevant `plugin.json` (for behavior changes in that plugin)
+- The `metadata.version` in `marketplace.json` (for any repo-level change)
+- A git tag AND a GitHub release (both required — neither alone is sufficient)
 
-**`allowed-tools` scoping:** Scope only to what that specific skill actually uses.
+**When writing or editing skills that produce regulatory outputs:**
+Ensure the skill's output instructions include the canonical disclaimer block followed by `<!-- architecture-studio:requires-disclaimer -->` as the final line. Do not rely on keyword matching.
 
-**No new build dependencies:** The only external dependency is `pyyaml` for lint.
+**`allowed-tools` scoping:** When writing or editing SKILL.md frontmatter, scope `allowed-tools` only to what that specific skill actually uses — not the union of all tools in the plugin or marketplace.
 
-**Hard rules belong in two places:** Both the dispatcher (`08-dispatcher`) AND each affected sub-skill body.
+**No new build dependencies:** There is no build system, no package manager, no compile step. Keep it that way. The only external dependency is `pyyaml` for lint. Do not introduce `npm`, `cargo`, `go build`, or any other build toolchain unless there is an extraordinary reason and it is explicitly approved.
 
-**Agent files are read-only reference documents:** Files in `agents/` are Markdown documents Claude reads via the Read tool. They do not contain tool calls.
+**Hard rules belong in two places:** Any rule captured from a production bug belongs in both the dispatcher (`08-dispatcher/skills/studio/SKILL.md`) for global inheritance AND in each affected sub-skill body, so it is enforced even when the dispatcher is bypassed.
+
+**Agent files are read-only reference documents:** Files in `agents/` are Markdown documents that Claude reads via the Read tool when routing a request. They do not contain tool calls. They define orchestration logic (which skills to call, in what order, what judgment to apply). Do not add executable content to agent files.
